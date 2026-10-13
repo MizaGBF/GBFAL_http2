@@ -16,6 +16,8 @@
 	#define sleep_ms(ms) sleep((ms) / 1000)
 #endif
 
+#define USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+
 // Forward declarations
 static PyObject* ext_init(PyObject *self, PyObject *args);
 static PyObject* ext_close(PyObject *self, PyObject *args);
@@ -363,9 +365,9 @@ static void* network_thread_func(void *arg)
 			}
 
 			curl_easy_setopt(easy, CURLOPT_URL, ctx->url);
+			curl_easy_setopt(easy, CURLOPT_USERAGENT, USER_AGENT);
 			curl_easy_setopt(easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
 			curl_easy_setopt(easy, CURLOPT_PIPEWAIT, 1L);
-			curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);
 			curl_easy_setopt(easy, CURLOPT_PRIVATE, ctx);
 
 			if(ctx->method == METHOD_GET)
@@ -414,7 +416,7 @@ static void* network_thread_func(void *arg)
 					ctx->content_length_len = 0;
 
 					curl_multi_remove_handle(g_multi_handle, easy);
-					sleep_ms(10);
+					sleep_ms(100);
 					curl_multi_add_handle(g_multi_handle, easy);
 				}
 				else if(msg->data.result == CURLE_OK)
@@ -447,12 +449,12 @@ static void* network_thread_func(void *arg)
 		if(g_active_count > 0 || (g_running && g_queue.head != NULL))
 		{
 			int numfds = 0;
-			curl_multi_poll(g_multi_handle, NULL, 0, 10, &numfds);
+			curl_multi_poll(g_multi_handle, NULL, 0, 2, &numfds);
 		}
-		else if (g_running)
+		else if(g_running)
 		{
 			int numfds = 0;
-			curl_multi_poll(g_multi_handle, NULL, 0, 100, &numfds);
+			curl_multi_poll(g_multi_handle, NULL, 0, 2, &numfds);
 		}
 	}
 
