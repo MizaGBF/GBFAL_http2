@@ -16,9 +16,10 @@
 	#define sleep_ms(ms) sleep((ms) / 1000)
 #endif
 
-#define USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+#define VERSION_STRING "0.2"
 
 // Forward declarations
+static PyObject* ext_version(PyObject *self, PyObject *args);
 static PyObject* ext_init(PyObject *self, PyObject *args);
 static PyObject* ext_close(PyObject *self, PyObject *args);
 static PyObject* ext_running(PyObject *self, PyObject *args);
@@ -66,6 +67,7 @@ static RequestQueue g_queue;
 static volatile bool g_running = false;
 static int g_concurrency = 90;
 static volatile size_t g_active_count = 0;
+static char* g_user_agent = NULL;
 
 static PyTypeObject ResponseType;
 
@@ -365,7 +367,7 @@ static void* network_thread_func(void *arg)
 			}
 
 			curl_easy_setopt(easy, CURLOPT_URL, ctx->url);
-			curl_easy_setopt(easy, CURLOPT_USERAGENT, USER_AGENT);
+			curl_easy_setopt(easy, CURLOPT_USERAGENT, g_user_agent);
 			curl_easy_setopt(easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
 			curl_easy_setopt(easy, CURLOPT_PIPEWAIT, 1L);
 			curl_easy_setopt(easy, CURLOPT_PRIVATE, ctx);
@@ -373,6 +375,7 @@ static void* network_thread_func(void *arg)
 			if(ctx->method == METHOD_GET)
 			{
 				curl_easy_setopt(easy, CURLOPT_HTTPGET, 1L);
+				curl_easy_setopt(easy, CURLOPT_ACCEPT_ENCODING, "gzip");
 				curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, write_body_cb);
 				curl_easy_setopt(easy, CURLOPT_WRITEDATA, ctx);
 			}
@@ -461,6 +464,16 @@ static void* network_thread_func(void *arg)
 	return NULL;
 }
 
+static PyObject* ext_version(PyObject *self, PyObject *args)
+{
+	(void)self;
+	if(!PyArg_ParseTuple(args, ""))
+	{
+		return NULL;
+	}
+	return Py_BuildValue("s", VERSION_STRING);
+}
+
 static PyObject* ext_init(PyObject *self, PyObject *args)
 {
 	(void)self;
@@ -470,13 +483,23 @@ static PyObject* ext_init(PyObject *self, PyObject *args)
 		return NULL;
 	}
 	int concurrency;
-	if(!PyArg_ParseTuple(args, "i", &concurrency))
+	const char *user_agent = NULL;
+	if(!PyArg_ParseTuple(args, "is", &concurrency, &user_agent))
 	{
 		return NULL;
 	}
 	if(concurrency < 1)
 	{
 		PyErr_SetString(PyExc_ValueError, "Concurrency must be greater than 0");
+		return NULL;
+	}
+
+	// Duplicate the string since PyArg_ParseTuple's "s" points to temporary internal Python object memory
+	free(g_user_agent);
+	g_user_agent = strdup(user_agent);
+	if(!g_user_agent)
+	{
+		PyErr_SetString(PyExc_MemoryError, "Failed to allocate memory for user agent");
 		return NULL;
 	}
 	g_concurrency = concurrency;
@@ -486,6 +509,8 @@ static PyObject* ext_init(PyObject *self, PyObject *args)
 	if(!g_multi_handle)
 	{
 		PyErr_SetString(PyExc_RuntimeError, "Failed to initialize curl_multi");
+		free(g_user_agent);
+		g_user_agent = NULL;
 		return NULL;
 	}
 	curl_multi_setopt(g_multi_handle, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
@@ -498,6 +523,8 @@ static PyObject* ext_init(PyObject *self, PyObject *args)
 		g_running = false;
 		curl_multi_cleanup(g_multi_handle);
 		g_multi_handle = NULL;
+		free(g_user_agent);
+		g_user_agent = NULL;
 		PyErr_SetString(PyExc_RuntimeError, "Failed to create worker thread");
 		return NULL;
 	}
@@ -534,6 +561,7 @@ static PyObject* ext_close(PyObject *self, PyObject *args)
 	}
 	queue_destroy();
 	curl_global_cleanup();
+	free(g_user_agent);
 
 	Py_RETURN_NONE;
 }
@@ -621,6 +649,7 @@ static PyObject* ext_queue_request(PyObject *self, PyObject *args)
 }
 
 static PyMethodDef http2Methods[] = {
+	{"version", ext_version, METH_VARARGS, "Return the version string."},
 	{"init", ext_init, METH_VARARGS, "Initialize worker thread with concurrency limit."},
 	{"close", ext_close, METH_NOARGS, "Shutdown worker thread."},
 	{"running", ext_running, METH_NOARGS, "Check if worker thread is running."},
