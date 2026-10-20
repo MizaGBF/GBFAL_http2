@@ -27,6 +27,12 @@ static PyObject* ext_queue_request(PyObject *self, PyObject *args);
 static void* network_thread_func(void *arg);
 
 typedef enum {
+	CLOSED = 0,
+	CLOSING = 1,
+	RUNNING = 2
+} ThreadState;
+
+typedef enum {
 	METHOD_HEAD = 0,
 	METHOD_GET
 } RequestMethod;
@@ -64,7 +70,7 @@ typedef struct RequestContext {
 static pthread_t g_worker;
 static CURLM* g_multi_handle = NULL;
 static RequestQueue g_queue;
-static volatile bool g_running = false;
+static volatile ThreadState g_state = CLOSED;
 static int g_concurrency = 90;
 static volatile size_t g_active_count = 0;
 static char* g_user_agent = NULL;
@@ -324,9 +330,9 @@ static void* network_thread_func(void *arg)
 {
 	(void)arg;
 
-	while(g_running || g_active_count > 0)
+	while(g_state == RUNNING || g_active_count > 0)
 	{
-		while(g_running && g_active_count < (size_t)g_concurrency)
+		while(g_state == RUNNING && g_active_count < (size_t)g_concurrency)
 		{
 			RequestNode node;
 			if(!queue_pop(&node))
@@ -412,7 +418,7 @@ static void* network_thread_func(void *arg)
 					|| msg->data.result == CURLE_HTTP2
 				);
 
-				if(g_running && network_error)
+				if(g_state == RUNNING && network_error)
 				{
 					// Reset context buffers and retry transfer
 					ctx->body_len = 0;
@@ -449,12 +455,12 @@ static void* network_thread_func(void *arg)
 			}
 		}
 
-		if(g_active_count > 0 || (g_running && g_queue.head != NULL))
+		if(g_active_count > 0 || (g_state == RUNNING && g_queue.head != NULL))
 		{
 			int numfds = 0;
 			curl_multi_poll(g_multi_handle, NULL, 0, 2, &numfds);
 		}
-		else if(g_running)
+		else if(g_state == RUNNING)
 		{
 			int numfds = 0;
 			curl_multi_poll(g_multi_handle, NULL, 0, 2, &numfds);
@@ -477,9 +483,14 @@ static PyObject* ext_version(PyObject *self, PyObject *args)
 static PyObject* ext_init(PyObject *self, PyObject *args)
 {
 	(void)self;
-	if(g_running)
+	if(g_state == RUNNING)
 	{
-		PyErr_SetString(PyExc_RuntimeError, "Worker is already running");
+		PyErr_SetString(PyExc_RuntimeError, "The worker is already running");
+		return NULL;
+	}
+	else if(g_state == CLOSING)
+	{
+		PyErr_SetString(PyExc_RuntimeError, "The previous worker is still closing");
 		return NULL;
 	}
 	int concurrency;
@@ -495,7 +506,6 @@ static PyObject* ext_init(PyObject *self, PyObject *args)
 	}
 
 	// Duplicate the string since PyArg_ParseTuple's "s" points to temporary internal Python object memory
-	free(g_user_agent);
 	g_user_agent = strdup(user_agent);
 	if(!g_user_agent)
 	{
@@ -515,20 +525,19 @@ static PyObject* ext_init(PyObject *self, PyObject *args)
 	}
 	curl_multi_setopt(g_multi_handle, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
 
-	g_running = true;
+	g_state = RUNNING;
 	g_active_count = 0;
 
 	if(pthread_create(&g_worker, NULL, network_thread_func, NULL) != 0)
 	{
-		g_running = false;
 		curl_multi_cleanup(g_multi_handle);
 		g_multi_handle = NULL;
 		free(g_user_agent);
 		g_user_agent = NULL;
+		g_state = CLOSED;
 		PyErr_SetString(PyExc_RuntimeError, "Failed to create worker thread");
 		return NULL;
 	}
-
 	Py_RETURN_NONE;
 }
 
@@ -536,12 +545,12 @@ static PyObject* ext_close(PyObject *self, PyObject *args)
 {
 	(void)self;
 	(void)args;
-	if(!g_running)
+	if(g_state != RUNNING)
 	{
 		Py_RETURN_NONE;
 	}
 
-	g_running = false;
+	g_state = CLOSING;
 
 	queue_clear();
 
@@ -562,7 +571,9 @@ static PyObject* ext_close(PyObject *self, PyObject *args)
 	queue_destroy();
 	curl_global_cleanup();
 	free(g_user_agent);
+	g_user_agent = NULL;
 
+	g_state = CLOSED;
 	Py_RETURN_NONE;
 }
 
@@ -570,7 +581,7 @@ static PyObject* ext_running(PyObject *self, PyObject *args)
 {
 	(void)self;
 	(void)args;
-	if(g_running)
+	if(g_state == RUNNING)
 	{
 		Py_RETURN_TRUE;
 	}
@@ -583,9 +594,9 @@ static PyObject* ext_running(PyObject *self, PyObject *args)
 static PyObject* ext_queue_request(PyObject *self, PyObject *args)
 {
 	(void)self;
-	if(!g_running)
+	if(g_state != RUNNING)
 	{
-		PyErr_SetString(PyExc_RuntimeError, "Worker thread is not running");
+		PyErr_SetString(PyExc_RuntimeError, "The worker is not running");
 		return NULL;
 	}
 
